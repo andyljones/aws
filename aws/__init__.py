@@ -13,6 +13,14 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
+CLOUD_CONFIG = """
+wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh && chmod u+x miniconda.sh 
+./miniconda.sh -b -p $HOME/miniconda
+echo 'export PATH="$PATH:$HOME/miniconda/bin"' >> ~/.bashrc
+source ~/.bashrc
+conda install jupyter --yes
+nohup ipython kernel -f kernel.json >/dev/null 2>&1 &
+"""
 
 def config(key):
     config = {**json.load(open('config.json')), **json.load(open('credentials.json'))}
@@ -90,7 +98,7 @@ def list_instances():
     return instances
 
 def console_output(instance):
-    print(instance.console_output().get('Output', 'No output'))
+    print(instance.console_output().get('Output', 'No output yet'))
 
 def command(instance, command):
     c = ssm().send_command(
@@ -109,14 +117,14 @@ def collapse(s):
     return re.sub('\n\s+', ' ', s, flags=re.MULTILINE)
 
 def tunnel(instance):
-    TUNNEL = collapse(f"""
+    command = collapse(f"""
         ssh -N 
         -L 8785:localhost:8785
         -L 8786:localhost:8786
         -o StrictHostKeyChecking=no
         -o UserKnownHostsFile=/dev/null
         -i ~/.ssh/{config('KEYPAIR')}.pem
-        ec2-user@{instance.public_ip}""")
+        ec2-user@{instance.public_ip_address}""")
 
     if tunnel_alive():
         print('Tunnel already created')
@@ -124,7 +132,7 @@ def tunnel(instance):
 
     os.makedirs('logs', exist_ok=True)
     log = open('logs/tunnel.log', 'wb')
-    p = subprocess.Popen(shlex.split(TUNNEL), stdout=log, stderr=subprocess.STDOUT)
+    p = subprocess.Popen(shlex.split(command), stdout=log, stderr=subprocess.STDOUT)
     for _ in range(5):
         time.sleep(1)
         if tunnel_alive():
@@ -140,11 +148,23 @@ def ssh(instance):
         -i "~/.ssh/{config('KEYPAIR')}.pem" 
         -o StrictHostKeyChecking=no 
         -o UserKnownHostsFile=/dev/null 
-        ec2-user@{instance.public_ip}"""))
+        ec2-user@{instance.public_ip_address}"""))
+
+def scp(instance, path):
+    command = collapse(f"""
+        scp 
+        -i "~/.ssh/{config('KEYPAIR')}.pem" 
+        -o StrictHostKeyChecking=no 
+        -o UserKnownHostsFile=/dev/null 
+        ec2-user@{instance.public_ip_address}:/{path}
+        .""")
+    subprocess.check_call(shlex.split(command))
+    pass
+
 
 def rsync(instance):
     """Need to install inotifytools with spaceman first"""
-    RSYNC = collapse(f"""
+    command = collapse(f"""
         while true; do
         rsync -az --progress
         -e "ssh 
@@ -154,11 +174,25 @@ def rsync(instance):
         --filter=':- .gitignore'
         --exclude .git
         .
-        ec2-user@{instance.public_ip}:code;
+        ec2-user@{instance.public_ip_address}:code;
         sleep 1;
         inotifywait -r -e modify,attrib,close_write,move,create,delete .;
         done""")
     
     os.makedirs('logs', exist_ok=True)
     log = open('logs/rsync.log', 'wb')
-    p = subprocess.Popen(RSYNC, stdout=log, stderr=subprocess.STDOUT, shell=True)
+    p = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, shell=True)
+
+def example():
+    import aws
+
+    # Set up your credentials.json and config.json file first. 
+
+    # Then request a spot instance!
+    instance = aws.request_spot('python', .15)
+
+    # Once you've got it, can check how boot is going with
+    aws.console_output(instance) # uses the API, can take a while to catch up
+
+    # Fetch the jupyter kernel file
+    scp(instance, '/home/ec2-user/.local/share/jupyter/runtime/kernel.json')
