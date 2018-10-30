@@ -11,11 +11,6 @@ import logging
 from io import StringIO
 import pandas as pd
 
-IMAGE_ID = 'ami-4cd4fd3f'
-
-AWS_IMAGE = 'ami-065ef4c5569ad0325'
-INSTANCE_TYPE = 't3.xlarge'
-
 log = logging.getLogger(__name__)
 
 
@@ -43,35 +38,26 @@ def ssm():
     
     return _ssm
 
-def cloud_config():
-    return """#!/bin/bash""" 
+def instance_spec(**kwargs):
+    return {'ImageId': config('IMAGE'),
+            'KeyName': config('KEYPAIR'),
+            'SecurityGroups': [config('SSH_GROUP'), config('MUTUAL_ACCESS_GROUP')],
+            'InstanceType': config('INSTANCE'),
+            'Placement': {'AvailabilityZone': config('AVAILABILITY_ZONE')},
+            'UserData': '#!/bin/bash\n' + kwargs.get('CONFIG', ''),
+            **kwargs}
 
-def create_instance(name, n=1, image=None):
-    image_id = AWS_IMAGE if image is None else image
-    
-    return ec2().create_instances(ImageId=image_id, 
-                                MinCount=n, 
-                                MaxCount=n, 
-                                KeyName=config('KEYPAIR'),
-                                UserData=cloud_config(),
-                                SecurityGroups=[config('SSH_GROUP'), config('MUTUAL_ACCESS_GROUP')],
-                                InstanceType=INSTANCE_TYPE,
-                                Placement={'AvailabilityZone': config('AVAILABILITY_ZONE')})
+def create_instance(name, **kwargs):
+    spec = instance_spec(**kwargs)
+    return ec2().create_instances(MinCount=1, MaxCount=1, **spec)[0]
 
-def request_spot(name, config, bid, n=1, image=None):
-    image_id = AWS_IMAGE if image is None else image
-    
+def request_spot(name, bid, **kwargs):
+    spec = instance_spec(**kwargs)
+    spec['UserData'] = base64.b64encode(spec['UserData'].encode()).decode()
     requests = ec2().meta.client.request_spot_instances(
+                    InstanceCount=1,
                     SpotPrice=str(bid),
-                    InstanceCount=n,
-                    LaunchSpecification=dict(
-                         ImageId=image_id,
-                         KeyName=config('KEYPAIR'),
-                         UserData=base64.b64encode(cloud_config().encode()).decode(),
-                         SecurityGroups=[config('SSH_GROUP'), config('MUTUAL_ACCESS_GROUP')],
-                         InstanceType=INSTANCE_TYPE,
-                         Placement={'AvailabilityZone': config('AVAILABILITY_ZONE')}
-                    ))
+                    LaunchSpecification=spec)
     
     request_ids = [r['SpotInstanceRequestId'] for r in requests['SpotInstanceRequests']]
     while True:
@@ -86,7 +72,7 @@ def request_spot(name, config, bid, n=1, image=None):
         time.sleep(5)
     
     instances = [ec2().Instance(d['InstanceId']) for d in desc['SpotInstanceRequests']]
-    return instances
+    return instances[0]
     
 def reboot_and_create_image(instance, name='python-ec2'):
     return instance.create_image(Name=name, NoReboot=False)

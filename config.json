@@ -2,4 +2,6 @@
  "AVAILABILITY_ZONE": "us-east-1d",
  "KEYPAIR": "andyljones-useast",
  "SSH_GROUP": "andyljones-ssh",
- "MUTUAL_ACCESS_GROUP": "andyljones-mutual-access"}
+ "MUTUAL_ACCESS_GROUP": "andyljones-mutual-access",
+ "IMAGE": "ami-0ff8a91507f77f867",
+ "INSTANCE": "m5.xlarge"}
