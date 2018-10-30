@@ -21,7 +21,6 @@ log = logging.getLogger(__name__)
 
 def config(key):
     config = {**json.load(open('config.json')), **json.load(open('credentials.json'))}
-    assert set(config) == {'AWS_KEY', 'AWS_SECRET', 'REGION', 'AVAILABILITY_ZONE', 'KEYPAIR', 'SSH_GROUP', 'MUTUAL_ACCESS_GROUP'}
     return config[key]
 
 _ec2 = None
@@ -29,7 +28,7 @@ def ec2():
     global _ec2
     if _ec2 is None:
         _ec2 = boto3.resource('ec2', region_name=config('REGION'), 
-                              aws_access_key_id=config('AWS_KEY'), 
+                              aws_access_key_id=config('AWS_ID'), 
                               aws_secret_access_key=config('AWS_SECRET'))
     
     return _ec2
@@ -39,7 +38,7 @@ def ssm():
     global _ssm
     if _ssm is None:
         _ssm = boto3.client('ssm', region_name=config('REGION'), 
-                              aws_access_key_id=config('AWS_KEY'), 
+                              aws_access_key_id=config('AWS_ID'), 
                               aws_secret_access_key=config('AWS_SECRET'))
     
     return _ssm

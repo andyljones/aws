@@ -1,4 +1,4 @@
-{"REGION": "us-east",
+{"REGION": "us-east-1",
  "AVAILABILITY_ZONE": "us-east-1d",
  "KEYPAIR": "andyljones-useast",
  "SSH_GROUP": "andyljones-ssh",
