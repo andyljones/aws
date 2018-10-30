@@ -1,0 +1,5 @@
+{"REGION": "us-east",
+ "AVAILABILITY_ZONE": "us-east-1d",
+ "KEYPAIR": "andyljones-useast",
+ "SSH_GROUP": "andyljones-ssh",
+ "MUTUAL_ACCESS_GROUP": "andyljones-mutual-access"}
