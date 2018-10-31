@@ -1,3 +1,4 @@
+from pathlib import Path
 from io import BytesIO
 import re
 import time
@@ -14,6 +15,7 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 CLOUD_CONFIG = """
+sudo su ec2-user && cd ~
 wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh && chmod u+x miniconda.sh 
 ./miniconda.sh -b -p $HOME/miniconda
 echo 'export PATH="$PATH:$HOME/miniconda/bin"' >> ~/.bashrc
@@ -100,67 +102,30 @@ def list_instances():
 def console_output(instance):
     print(instance.console_output().get('Output', 'No output yet'))
 
-def command(instance, command):
-    c = ssm().send_command(
-            InstanceIds=[instance.instance_id], 
-            DocumentName='AWS-RunShellScript',
-            Parameters={'commands': [command]})
-    return c
-
-def cloud_init_output(instance):
-    return command(instance, 'cat /var/log/cloud-init.log')
-    
-def tunnel_alive():
-    return subprocess.call(shlex.split("nc -z localhost 8786")) == 0
-
 def collapse(s):
     return re.sub('\n\s+', ' ', s, flags=re.MULTILINE)
 
-def tunnel(instance):
-    command = collapse(f"""
-        ssh -N 
-        -L 8785:localhost:8785
-        -L 8786:localhost:8786
-        -o StrictHostKeyChecking=no
-        -o UserKnownHostsFile=/dev/null
-        -i ~/.ssh/{config('KEYPAIR')}.pem
+def ssh_options(instance):
+    return collapse(f"""
+        -i "~/.ssh/{config('KEYPAIR')}.pem" 
+        -o StrictHostKeyChecking=no 
+        -o UserKnownHostsFile=/dev/null 
         ec2-user@{instance.public_ip_address}""")
 
-    if tunnel_alive():
-        print('Tunnel already created')
-        return
-
-    os.makedirs('logs', exist_ok=True)
-    log = open('logs/tunnel.log', 'wb')
-    p = subprocess.Popen(shlex.split(command), stdout=log, stderr=subprocess.STDOUT)
-    for _ in range(5):
-        time.sleep(1)
-        if tunnel_alive():
-            print('Tunnel created')
-            return
-
-    p.kill()
-    print('Failed to establish tunnel; check logs/tunnel.log for details')
-
 def ssh(instance):
-    print(collapse(f"""
-        ssh 
-        -i "~/.ssh/{config('KEYPAIR')}.pem" 
-        -o StrictHostKeyChecking=no 
-        -o UserKnownHostsFile=/dev/null 
-        ec2-user@{instance.public_ip_address}"""))
+    print(collapse(f"""ssh {ssh_options(instance)}"""))
+
+def command(instance, command):
+    c = collapse(f"""ssh {ssh_options(instance)} command""")
+    return subprocess.call(shlex.split(c))
+
+def boot_finished(instance):
+    return command(instance, 'cat /var/lib/cloud/instance/boot-finished') == 0
 
 def scp(instance, path):
-    command = collapse(f"""
-        scp 
-        -i "~/.ssh/{config('KEYPAIR')}.pem" 
-        -o StrictHostKeyChecking=no 
-        -o UserKnownHostsFile=/dev/null 
-        ec2-user@{instance.public_ip_address}:/{path}
-        .""")
+    Path('./cache').mkdir(exist_ok=True, parents=True)
+    command = collapse(f"""scp {ssh_options(instance)}:/{path} ./cache""")
     subprocess.check_call(shlex.split(command))
-    pass
-
 
 def rsync(instance):
     """Need to install inotifytools with spaceman first"""
@@ -183,6 +148,38 @@ def rsync(instance):
     log = open('logs/rsync.log', 'wb')
     p = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, shell=True)
 
+def kernel_config(instance):
+    scp(instance, '/home/ec2-user/.local/share/jupyter/runtime/kernel.json')
+    return json.loads(Path('cache/kernel.json').read_text())
+
+def tunnel_alive(port):
+    return subprocess.call(shlex.split(f"nc -z 127.0.0.1 {port}")) == 0
+
+def tunnel(instance):
+    kernel = kernel_config(instance)
+    ports = ' '.join(f'-L {v}:localhost:{v}' for k, v in kernel.items() if k.endswith('_port'))
+    command = collapse(f"ssh -N {ports} {ssh_options(instance)}")
+
+    if tunnel_alive(kernel['control_port']):
+        print('Tunnel already created')
+        return
+
+    os.makedirs('logs', exist_ok=True)
+    log = open('logs/tunnel.log', 'wb')
+    p = subprocess.Popen(shlex.split(command), stdout=log, stderr=subprocess.STDOUT)
+    for _ in range(5):
+        time.sleep(1)
+        if tunnel_alive(kernel['control_port']):
+            print('Tunnel created')
+            return
+
+    p.kill()
+    print('Failed to establish tunnel; check logs/tunnel.log for details')
+
+def remote_console():
+    command = 'ipython qtconsole --existing ./cache/kernel.json'
+    p = subprocess.Popen(shlex.split(command))
+
 def example():
     import aws
 
@@ -194,5 +191,10 @@ def example():
     # Once you've got it, can check how boot is going with
     aws.console_output(instance) # uses the API, can take a while to catch up
 
-    # Fetch the jupyter kernel file
-    scp(instance, '/home/ec2-user/.local/share/jupyter/runtime/kernel.json')
+    # When 
+    aws.boot_finished(instance) 
+    # can continue
+
+    # Set up a tunnel to the remote kernel, then start a remote console
+    tunnel(instance)
+    remote_console()
