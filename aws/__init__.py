@@ -14,13 +14,19 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
-CLOUD_CONFIG = """
+INITIAL_CONFIG = """
 sudo su ec2-user && cd ~
 wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh && chmod u+x miniconda.sh 
 ./miniconda.sh -b -p $HOME/miniconda
 echo 'export PATH="$PATH:$HOME/miniconda/bin"' >> ~/.bashrc
 source ~/.bashrc
 conda install jupyter --yes
+mkdir code && cd code
+nohup ipython kernel -f kernel.json >/dev/null 2>&1 &
+"""
+
+CONFIG = """
+cd code
 nohup ipython kernel -f kernel.json >/dev/null 2>&1 &
 """
 
@@ -37,16 +43,6 @@ def ec2():
                               aws_secret_access_key=config('AWS_SECRET'))
     
     return _ec2
-
-_ssm = None
-def ssm():
-    global _ssm
-    if _ssm is None:
-        _ssm = boto3.client('ssm', region_name=config('REGION'), 
-                              aws_access_key_id=config('AWS_ID'), 
-                              aws_secret_access_key=config('AWS_SECRET'))
-    
-    return _ssm
 
 def instance_spec(**kwargs):
     return {'ImageId': config('IMAGE'),
@@ -105,18 +101,20 @@ def console_output(instance):
 def collapse(s):
     return re.sub('\n\s+', ' ', s, flags=re.MULTILINE)
 
-def ssh_options(instance):
+def ssh_options():
     return collapse(f"""
         -i "~/.ssh/{config('KEYPAIR')}.pem" 
         -o StrictHostKeyChecking=no 
-        -o UserKnownHostsFile=/dev/null 
-        ec2-user@{instance.public_ip_address}""")
+        -o UserKnownHostsFile=/dev/null""")
+
+def host(instance):
+    return f"ec2-user@{instance.public_ip_address}"
 
 def ssh(instance):
-    print(collapse(f"""ssh {ssh_options(instance)}"""))
+    print(collapse(f"""ssh {ssh_options()} {host(instance)}"""))
 
 def command(instance, command):
-    c = collapse(f"""ssh {ssh_options(instance)} command""")
+    c = collapse(f"""ssh {ssh_options()} {host(instance)} {command}""")
     return subprocess.call(shlex.split(c))
 
 def boot_finished(instance):
@@ -124,25 +122,22 @@ def boot_finished(instance):
 
 def scp(instance, path):
     Path('./cache').mkdir(exist_ok=True, parents=True)
-    command = collapse(f"""scp {ssh_options(instance)}:/{path} ./cache""")
+    command = collapse(f"""scp {ssh_options()} {host(instance)}:/{path} ./cache""")
     subprocess.check_call(shlex.split(command))
 
 def rsync(instance):
-    """Need to install inotifytools with spaceman first"""
+    """Need to install fswatch with brew first"""
+    subcommand = collapse(f"""
+                rsync -az --progress
+                -e "ssh {ssh_options()}"
+                --filter=':- .gitignore'
+                --exclude .git
+                .
+                {host(instance)}:code""")
+
     command = collapse(f"""
-        while true; do
-        rsync -az --progress
-        -e "ssh 
-            -i "~/.ssh/{config('KEYPAIR')}.pem" 
-            -o StrictHostKeyChecking=no 
-            -o UserKnownHostsFile=/dev/null"
-        --filter=':- .gitignore'
-        --exclude .git
-        .
-        ec2-user@{instance.public_ip_address}:code;
-        sleep 1;
-        inotifywait -r -e modify,attrib,close_write,move,create,delete .;
-        done""")
+        {subcommand}
+        fswatch -o  -l 1 . | while read f; do {subcommand}; done""")
     
     os.makedirs('logs', exist_ok=True)
     log = open('logs/rsync.log', 'wb')
@@ -158,7 +153,7 @@ def tunnel_alive(port):
 def tunnel(instance):
     kernel = kernel_config(instance)
     ports = ' '.join(f'-L {v}:localhost:{v}' for k, v in kernel.items() if k.endswith('_port'))
-    command = collapse(f"ssh -N {ports} {ssh_options(instance)}")
+    command = collapse(f"ssh -N {ports} {ssh_options()} {host(instance)}")
 
     if tunnel_alive(kernel['control_port']):
         print('Tunnel already created')
@@ -167,7 +162,7 @@ def tunnel(instance):
     os.makedirs('logs', exist_ok=True)
     log = open('logs/tunnel.log', 'wb')
     p = subprocess.Popen(shlex.split(command), stdout=log, stderr=subprocess.STDOUT)
-    for _ in range(5):
+    for _ in range(20):
         time.sleep(1)
         if tunnel_alive(kernel['control_port']):
             print('Tunnel created')
@@ -186,15 +181,15 @@ def example():
     # Set up your credentials.json and config.json file first. 
 
     # Then request a spot instance!
-    instance = aws.request_spot('python', .15)
+    instance = aws.request_spot('python', .15, CONFIG=INITIAL_CONFIG)
 
     # Once you've got it, can check how boot is going with
     aws.console_output(instance) # uses the API, can take a while to catch up
 
-    # When 
+    # When this returns True, can continue
     aws.boot_finished(instance) 
-    # can continue
 
-    # Set up a tunnel to the remote kernel, then start a remote console
+    # Set up a tunnel to the remote kernel, set up the rsync, then start a remote console
     tunnel(instance)
+    rsync(instance)
     remote_console()
