@@ -13,21 +13,28 @@ from io import StringIO
 import pandas as pd
 
 log = logging.getLogger(__name__)
+log.setLevel('DEBUG')
+logging.getLogger('').setLevel('DEBUG')
 
 INITIAL_CONFIG = """
-sudo su ec2-user && cd ~
+cd /home/ec2-user
 wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh && chmod u+x miniconda.sh 
-./miniconda.sh -b -p $HOME/miniconda
-echo 'export PATH="$PATH:$HOME/miniconda/bin"' >> ~/.bashrc
-source ~/.bashrc
-conda install jupyter --yes
-mkdir code && cd code
-nohup ipython kernel -f kernel.json >/dev/null 2>&1 &
+./miniconda.sh -b -p miniconda && chown -R ec2-user:ec2-user miniconda
+rm miniconda.sh
+echo 'export PATH="$PATH:$HOME/miniconda/bin"' >> .bashrc
+mkdir code && chown -R ec2-user:ec2-user code
+su ec2-user -l -c '
+    conda install jupyter --yes
+    cd ~/code
+    nohup ipython kernel -f kernel.json >~/kernel.log 2>&1 &
+'
 """
 
 CONFIG = """
-cd code
-nohup ipython kernel -f kernel.json >/dev/null 2>&1 &
+su ec2-user -l -c '
+    cd ~/code
+    nohup ipython kernel -f kernel.json >~/kernel.log 2>&1 &
+'
 """
 
 def config(key):
@@ -44,14 +51,20 @@ def ec2():
     
     return _ec2
 
-def instance_spec(**kwargs):
-    return {'ImageId': config('IMAGE'),
-            'KeyName': config('KEYPAIR'),
-            'SecurityGroups': [config('SSH_GROUP'), config('MUTUAL_ACCESS_GROUP')],
-            'InstanceType': config('INSTANCE'),
-            'Placement': {'AvailabilityZone': config('AVAILABILITY_ZONE')},
-            'UserData': '#!/bin/bash\n' + kwargs.get('CONFIG', ''),
-            **kwargs}
+def instance_spec(image=None, script=None, **kwargs):
+    defaults = {'ImageId': config('IMAGE'),
+                'KeyName': config('KEYPAIR'),
+                'SecurityGroups': [config('SSH_GROUP'), config('MUTUAL_ACCESS_GROUP')],
+                'InstanceType': config('INSTANCE'),
+                'Placement': {'AvailabilityZone': config('AVAILABILITY_ZONE')},
+                'UserData': '#!/bin/bash\n'}
+    
+    if image:
+        defaults['ImageId'] = images()[image].id
+    if script:
+        defaults['UserData'] = defaults['UserData'] + script
+
+    return defaults
 
 def create_instance(name, **kwargs):
     spec = instance_spec(**kwargs)
@@ -70,17 +83,18 @@ def request_spot(name, bid, **kwargs):
         try:
             desc = ec2().meta.client.describe_spot_instance_requests(SpotInstanceRequestIds=request_ids)
             states = [d['Status']['Code'] for d in desc['SpotInstanceRequests']]
-            print('States: {}'.format(', '.join(states)))
+            log.info('States: {}'.format(', '.join(states)))
             if all([s == 'fulfilled' for s in states]):
                 break
-        except boto3.exceptions.botocore.client.ClientError as e:
-            print('Exception while waiting for spot requests: {}'.format(e))
+        except boto3.exceptions.botocore.client.ClientError:
+            log.info(f'Exception while waiting for spot requests')
+            raise
         time.sleep(5)
     
     instances = [ec2().Instance(d['InstanceId']) for d in desc['SpotInstanceRequests']]
     return instances[0]
     
-def reboot_and_create_image(instance, name='python-ec2'):
+def create_image(instance, name='python-ec2'):
     return instance.create_image(Name=name, NoReboot=False)
     
 def set_name(instance, name):
@@ -89,14 +103,19 @@ def set_name(instance, name):
 def as_dict(tags):
     return {t['Key']: t['Value'] for t in tags} if tags else {}
     
-def list_instances():
+def instances():
     instances = {}
     for i in ec2().instances.all():
         instances.setdefault(as_dict(i.tags).get('Name', 'NONE'), []).append(i)
     return instances
 
+def images():
+    return {i.name: i for i in ec2().images.filter(Owners=['self']).all()}
+
 def console_output(instance):
     print(instance.console_output().get('Output', 'No output yet'))
+
+
 
 def collapse(s):
     return re.sub('\n\s+', ' ', s, flags=re.MULTILINE)
@@ -117,8 +136,20 @@ def command(instance, command):
     c = collapse(f"""ssh {ssh_options()} {host(instance)} {command}""")
     return subprocess.call(shlex.split(c))
 
-def boot_finished(instance):
-    return command(instance, 'cat /var/lib/cloud/instance/boot-finished') == 0
+def command_output(instance, command):
+    c = collapse(f"""ssh {ssh_options()} {host(instance)} {command}""")
+    return subprocess.check_output(shlex.split(c))
+
+def cloud_init_output(instance):
+    print(command_output(instance, 'tail -n100 /var/log/cloud-init-output.log').decode())
+
+def await_boot(instance):
+    while True:
+        log.info('Awaiting boot')
+        if command(instance, 'cat /var/lib/cloud/instance/boot-finished') == 0:
+            log.info('Booted')
+            return
+        time.sleep(1)
 
 def scp(instance, path):
     Path('./cache').mkdir(exist_ok=True, parents=True)
@@ -127,6 +158,7 @@ def scp(instance, path):
 
 def rsync(instance):
     """Need to install fswatch with brew first"""
+    log.info('Establishing rsync')
     subcommand = collapse(f"""
                 rsync -az --progress
                 -e "ssh {ssh_options()}"
@@ -140,8 +172,9 @@ def rsync(instance):
         fswatch -o  -l 1 . | while read f; do {subcommand}; done""")
     
     os.makedirs('logs', exist_ok=True)
-    log = open('logs/rsync.log', 'wb')
-    p = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, shell=True)
+    logs = open('logs/rsync.log', 'wb')
+    p = subprocess.Popen(command, stdout=logs, stderr=subprocess.STDOUT, shell=True)
+    return p
 
 def kernel_config(instance):
     scp(instance, '/home/ec2-user/.local/share/jupyter/runtime/kernel.json')
@@ -151,25 +184,26 @@ def tunnel_alive(port):
     return subprocess.call(shlex.split(f"nc -z 127.0.0.1 {port}")) == 0
 
 def tunnel(instance):
+    log.info('Establishing tunnel')
     kernel = kernel_config(instance)
     ports = ' '.join(f'-L {v}:localhost:{v}' for k, v in kernel.items() if k.endswith('_port'))
     command = collapse(f"ssh -N {ports} {ssh_options()} {host(instance)}")
 
     if tunnel_alive(kernel['control_port']):
-        print('Tunnel already created')
+        log.info('Tunnel already created')
         return
 
     os.makedirs('logs', exist_ok=True)
-    log = open('logs/tunnel.log', 'wb')
-    p = subprocess.Popen(shlex.split(command), stdout=log, stderr=subprocess.STDOUT)
+    logs = open('logs/tunnel.log', 'wb')
+    p = subprocess.Popen(shlex.split(command), stdout=logs, stderr=subprocess.STDOUT)
     for _ in range(20):
         time.sleep(1)
         if tunnel_alive(kernel['control_port']):
-            print('Tunnel created')
-            return
+            log.info('Tunnel created')
+            return p
 
     p.kill()
-    print('Failed to establish tunnel; check logs/tunnel.log for details')
+    raise IOError('Failed to establish tunnel; check logs/tunnel.log for details')
 
 def remote_console():
     command = 'ipython qtconsole --existing ./cache/kernel.json'
@@ -181,15 +215,25 @@ def example():
     # Set up your credentials.json and config.json file first. 
 
     # Then request a spot instance!
-    instance = aws.request_spot('python', .15, CONFIG=INITIAL_CONFIG)
+    instance = aws.request_spot('python', .15, script=aws.INITIAL_CONFIG)
+    aws.await_boot(instance) 
 
     # Once you've got it, can check how boot is going with
-    aws.console_output(instance) # uses the API, can take a while to catch up
-
-    # When this returns True, can continue
-    aws.boot_finished(instance) 
+    aws.cloud_init_output(instance)
+    ssh(instance) # prints the SSH command needed to connect
 
     # Set up a tunnel to the remote kernel, set up the rsync, then start a remote console
-    tunnel(instance)
-    rsync(instance)
+    aws.tunnel(instance)
+    aws.rsync(instance)
+    aws.remote_console()
+
+    # Use the console and ! commands to install any packages you need. Then create an image with
+    aws.create_image(instance, name='python-ec2')
+    instance.terminate()
+
+    # Now test it out
+    instance = aws.request_spot('python', .15, script=aws.CONFIG, image='python-ec2')
+    aws.await_boot(instance)
+    aws.tunnel(instance)
+    aws.rsync(instance)
     remote_console()
