@@ -114,8 +114,6 @@ def images():
 def console_output(instance):
     print(instance.console_output().get('Output', 'No output yet'))
 
-
-
 def collapse(s):
     return re.sub('\n\s+', ' ', s, flags=re.MULTILINE)
 
@@ -212,6 +210,7 @@ def example():
     import aws
 
     # Set up your credentials.json and config.json file first. 
+    # There are templates in this repo; copy them into your working dir
 
     # Then request a spot instance!
     instance = aws.request_spot('python', .15, script=aws.INITIAL_CONFIG)
@@ -230,11 +229,14 @@ def example():
     aws.create_image(instance, name='python-ec2')
 
     # Wait a minute or two until the image is finished
-    instance.terminate()
+    while True:
+        if all(v.state == 'available' for k, v in aws.images().items()):
+            instance.terminate()
+        aws.time.sleep(5)
 
     # Now test it out
     instance = aws.request_spot('python', .15, script=aws.CONFIG, image='python-ec2')
     aws.await_boot(instance)
     aws.tunnel(instance)
     aws.rsync(instance)
-    remote_console()
+    aws.remote_console()
