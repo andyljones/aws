@@ -14,7 +14,6 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 log.setLevel('DEBUG')
-logging.getLogger('').setLevel('DEBUG')
 
 INITIAL_CONFIG = """
 cd /home/ec2-user
@@ -229,6 +228,8 @@ def example():
 
     # Use the console and ! commands to install any packages you need. Then create an image with
     aws.create_image(instance, name='python-ec2')
+
+    # Wait a minute or two until the image is finished
     instance.terminate()
 
     # Now test it out
