@@ -20,7 +20,7 @@ cd /home/ec2-user
 wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh && chmod u+x miniconda.sh 
 ./miniconda.sh -b -p miniconda && chown -R ec2-user:ec2-user miniconda
 rm miniconda.sh
-echo 'export PATH="$PATH:$HOME/miniconda/bin"' >> .bashrc
+echo 'export PATH="$HOME/miniconda/bin:$PATH"' >> .bashrc
 mkdir code && chown -R ec2-user:ec2-user code
 su ec2-user -l -c '
     conda install jupyter --yes
@@ -69,7 +69,7 @@ def set_name(obj, name):
     ec2().create_tags(Resources=[obj.id], Tags=[{'Key': 'Name', 'Value': name}])
 
 def instances():
-    return {as_dict(i.tags).get('Name', 'unnamed'): i for i in ec2().instances.all()}
+    return {as_dict(i.tags).get('Name', 'unnamed'): i for i in ec2().instances.all() if i.state['Name'] != 'terminated'}
 
 def create_instance(name, **kwargs):
     assert name not in instances()
@@ -107,7 +107,22 @@ def request_spot(name, bid, **kwargs):
     return instance
     
 def create_image(instance, name='python-ec2'):
-    return instance.create_image(Name=name, NoReboot=False)
+    if name in images():
+        log.warn('Deleting old image')
+        im = images()[name]
+        devices = im.block_device_mappings
+        im.deregister()
+        for device in devices:
+            ec2().Snapshot(device['Ebs']['SnapshotId']).delete()
+
+    im = instance.create_image(Name=name, NoReboot=False)
+    while True:
+        im = ec2().Image(im.id)
+        log.info(f'Image is {im.state}')
+        if im.state == 'available':
+            return im
+
+        time.sleep(5)
 
 def volumes():
     return {as_dict(i.tags).get('Name', 'unnamed'): i for i in ec2().volumes.all()}
