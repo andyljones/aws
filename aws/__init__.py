@@ -65,11 +65,23 @@ def instance_spec(image=None, script=None, **kwargs):
 
     return defaults
 
+def set_name(obj, name):
+    ec2().create_tags(Resources=[obj.id], Tags=[{'Key': 'Name', 'Value': name}])
+
+def instances():
+    return {as_dict(i.tags).get('Name', 'unnamed'): i for i in ec2().instances.all()}
+
 def create_instance(name, **kwargs):
+    assert name not in instances()
+
     spec = instance_spec(**kwargs)
-    return ec2().create_instances(MinCount=1, MaxCount=1, **spec)[0]
+    instance = ec2().create_instances(MinCount=1, MaxCount=1, **spec)[0]
+    set_name(instance, name)
+    return instance
 
 def request_spot(name, bid, **kwargs):
+    assert name not in instances()
+
     spec = instance_spec(**kwargs)
     spec['UserData'] = base64.b64encode(spec['UserData'].encode()).decode()
     requests = ec2().meta.client.request_spot_instances(
@@ -90,24 +102,31 @@ def request_spot(name, bid, **kwargs):
             raise
         time.sleep(5)
     
-    instances = [ec2().Instance(d['InstanceId']) for d in desc['SpotInstanceRequests']]
-    return instances[0]
+    instance = ec2().Instance(desc['SpotInstanceRequests'][0]['InstanceId']) 
+    set_name(instance, name)
+    return instance
     
 def create_image(instance, name='python-ec2'):
     return instance.create_image(Name=name, NoReboot=False)
-    
-def set_name(instance, name):
-    ec2().create_tags(Resources=[instance.id], Tags=[{'Key': 'Name', 'Value': name}])
 
+def volumes():
+    return {as_dict(i.tags).get('Name', 'unnamed'): i for i in ec2().volumes.all()}
+
+def create_volume(name, size):
+    assert name not in volumes(), 'Already created a volume with that name'
+    assert size < 128
+    volume = ec2().create_volume(AvailabilityZone=config('AVAILABILITY_ZONE'), Size=size)
+    set_name(volume, name)
+    return volume
+
+def attach_volume(instance, volume, device='/dev/sdf'):
+    if isinstance(volume, str):
+        volume = volumes()[volume]
+    instance.attach_volume(Device=device, VolumeId=volume.id)
+    
 def as_dict(tags):
     return {t['Key']: t['Value'] for t in tags} if tags else {}
     
-def instances():
-    instances = {}
-    for i in ec2().instances.all():
-        instances.setdefault(as_dict(i.tags).get('Name', 'NONE'), []).append(i)
-    return instances
-
 def images():
     return {i.name: i for i in ec2().images.filter(Owners=['self']).all()}
 
