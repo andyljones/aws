@@ -178,18 +178,19 @@ def rsync(instance):
     subcommand = collapse(f"""
                 rsync -az --progress
                 -e "ssh {ssh_options()}"
-                --filter=':- .gitignore'
+                --filter=":- .gitignore"
                 --exclude .git
                 .
                 {host(instance)}:code""")
 
     command = collapse(f"""
-        {subcommand}
-        fswatch -o  -l 1 . | while read f; do {subcommand}; done""")
+        {subcommand};
+        fswatch -o . | while read f; do {subcommand}; done""")
+    print(command)
     
     os.makedirs('logs', exist_ok=True)
     logs = open('logs/rsync.log', 'wb')
-    p = subprocess.Popen(command, stdout=logs, stderr=subprocess.STDOUT, shell=True)
+    p = subprocess.Popen(command, stdout=logs, stderr=subprocess.STDOUT, shell=True, executable='/bin/bash')
     return p
 
 def kernel_config(instance):
