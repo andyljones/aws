@@ -201,7 +201,6 @@ def rsync(instance):
     command = collapse(f"""
         {subcommand};
         fswatch -o . | while read f; do {subcommand}; done""")
-    print(command)
     
     os.makedirs('logs', exist_ok=True)
     logs = open('logs/rsync.log', 'wb')
